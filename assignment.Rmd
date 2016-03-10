@@ -1,0 +1,178 @@
+---
+title: "Prediction Assignment Writeup"
+author: "Luciano Lattes"
+date: "March 10, 2016"
+output:
+  html_document:
+    toc: true
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(cache = TRUE)
+```
+
+# Assignment goal
+The main objective of this assignment is predicting the manner in which a series of people did a weight lifting exercise based on data collected from accelerometers on the belt, forearm, arm, and dumbell.
+
+To achieve the mentioned goal, we will _tidy our data_, _train a prediction model_ and use that model to _predict 20 different test cases_.
+
+# Model training
+
+For this prediction assignment, we'll use __dplyr__ and __caret__ libraries so let's load them first:
+
+```{r, message = FALSE, warning = FALSE}
+setwd("~/Projects/practical-ml-assignment")
+
+library(dplyr)
+library(caret)
+```
+
+Then, we need to ingest the data into R. For that purpose, we use `read.csv` with some custom options to avoid problems in the resulting `data.frame`:
+
+```{r, results = 'hold'}
+training <- read.csv("pml-training.csv", stringsAsFactors = FALSE, dec = ".", numerals = "allow.loss")
+# Check the possible values of the outcome variable and the participants
+unique(training$classe)
+unique(training$user_name)
+# Check the dimensions of our data.frame
+dim(training)
+```
+
+For tidying our data we need to transform several character variables, like `classe`, `user_name` and `new_window`, into factors and also transform the numerical variables that were coerced to characters into numeric.
+
+```{r, results = 'hold', warning = FALSE}
+training$user_name <- as.factor(training$user_name)
+training$classe <- as.factor(training$classe)
+training$new_window <- as.factor(training$new_window)
+
+# Check which columns related to accelerometer data are still character and coerce to numeric
+character_cols <- which(sapply(training, is.character))
+for (i in character_cols) {
+  if (i >= 12 & i < 160) {
+    training[, i] <- as.numeric(training[, i])
+  }
+}
+```
+
+The remaining `character` column is `cvtd_timestamp`. We will split that feature into 5 new columns (year, month, day, hour, minutes):
+
+```{r, results = 'hold', warning = FALSE}
+training$cvtd_timestamp <- as.POSIXct(training$cvtd_timestamp, format = "%d/%m/%Y %H:%M", tz = "UTC")
+training$timestamp_year <- as.integer(format(training$cvtd_timestamp, "%Y"))
+training$timestamp_month <- as.integer(format(training$cvtd_timestamp, "%m"))
+training$timestamp_day <- as.integer(format(training$cvtd_timestamp, "%d"))
+training$timestamp_hour <- as.integer(format(training$cvtd_timestamp, "%H"))
+training$timestamp_minutes <- as.integer(format(training$cvtd_timestamp, "%M"))
+```
+
+Finally, we'll remove two unnecessary predictors and replace all NAs in numeric predictors by zeroes:
+
+```{r}
+training <- training %>% select(-X, -cvtd_timestamp)
+# There are many NAs in numeric columns, following function will return TRUE if any
+sapply(training, function (x) {any(is.na(x))})
+training[is.na(training)] <- 0 # Not so many NAs anymore!
+```
+
+Now that the training data is tidy enough, we'll create a data partition for training and testing our model. We'll use the __80/20__ rule of thumb for the partition:
+
+```{r, warning = FALSE}
+set.seed(123)
+to_train <- createDataPartition(y = training$classe, p = 0.8, list = FALSE)
+training_set <- training[to_train, ]
+testing_set <- training[-to_train, ]
+# Check the dimensions of both sets
+dim(training_set)
+dim(testing_set)
+# And see if the split based on the outcome (classe) has reasonable proportions
+summary(training_set$classe)
+summary(testing_set$classe)
+```
+
+Seems we have a good split. Classes `A` and `B` have more occurrences than the other outcomes in both sets and the proportions seem similar. Now we're leaving `testing_set` __alone for a while__, we'll train our model relying only in `training_set` and we'll come back to our `testing_set` later to validate the accuracy of the resulting model.
+
+For training our model, we'll tell `caret` to perform a K-Fold cross validation. We'll break `training_set` into 5 subsets. The choice of 5 is somewhat arbitrary, the attempt is to take the bias-variance tradeoff into account and also avoid very high computational times.
+
+```{r, eval = FALSE}
+# Train using 500 trees and 5-Fold CV
+random_forest <- train(classe ~ ., data = training_set, method = "rf",
+                       prox = TRUE, ntree = 500, do.trace = TRUE, allowParallel = TRUE,
+                       trControl = trainControl(method = "cv", number = 5))
+```
+
+```{r, echo = FALSE}
+load("~/Projects/practical-ml-assignment/environment.RData")
+```
+
+Let's take a look at the resulting model:
+
+```{r}
+# Check the accuracy of the trained final model by looking at its confusion matrix
+print(random_forest$finalModel$confusion)
+```
+
+It seems, based on the confusion matrix, that the classification errors for our trained model are very low, which is great!
+
+Remind our `testing_set` data frame? Now we can use it for validating the results of our trained model:
+
+```{r, results = 'hold', warning = FALSE}
+# We use the predict function with our model as first parameter and the testing_set
+predictions_testing_set <- predict(random_forest, testing_set)
+testing_set$right_predictions <- predictions_testing_set == testing_set$classe
+table(predictions_testing_set, testing_set$classe)
+```
+
+We only had __2__ classification errors out of `r nrow(testing_set)` cases! Seems we DO have a great model for predicting over the 20 different test cases.
+
+Let's plot the results so we can get a better sense of the accuracy of our model:
+
+```{r, dpi=200, fig.height=9, fig.width=9}
+# Plot num_window for each user colouring the dots according to the rightness of predictions
+qplot(user_name, num_window, colour = right_predictions, data = testing_set, main="Prediction results")
+```
+
+It's very hard to spot the __red__ `FALSE` points in the plot representing classification errors. If you look carefully, for user `charles`, a little bit below the `750` mark, you'll be able to see a tiny part of a red dot representing one of the two errors.
+
+# Predicting over the 20 testing cases
+
+We need to do the same kind of data tidying we did for the training data, this time with `pml-testing.csv`:
+
+```{r, results = 'hide', warning = FALSE}
+testing <- read.csv("pml-testing.csv", stringsAsFactors = FALSE, dec = ".", numerals = "allow.loss")
+testing$user_name <- as.factor(testing$user_name)
+testing$new_window <- factor(testing$new_window, levels = c("no", "yes"))
+
+test_character_cols <- which(sapply(testing, is.character))
+test_logical_cols <- which(sapply(testing, is.logical))
+
+# This time, several all NA columns in the CSV were ingested as logical. We'll transform to numeric.
+for (i in test_logical_cols) {
+  testing[, i] <- as.numeric(testing[, i])
+}
+
+# Split cvtd_timestamp in year, month, day, hour, minutes
+testing$cvtd_timestamp <- as.POSIXct(testing$cvtd_timestamp, format = "%d/%m/%Y %H:%M", tz = "UTC")
+testing$timestamp_year <- as.integer(format(testing$cvtd_timestamp, "%Y"))
+testing$timestamp_month <- as.integer(format(testing$cvtd_timestamp, "%m"))
+testing$timestamp_day <- as.integer(format(testing$cvtd_timestamp, "%d"))
+testing$timestamp_hour <- as.integer(format(testing$cvtd_timestamp, "%H"))
+testing$timestamp_minutes <- as.integer(format(testing$cvtd_timestamp, "%M"))
+
+testing <- testing %>% select(-X, -cvtd_timestamp)
+# There are many NAs in numeric columns
+sapply(testing, function (x) {any(is.na(x))})
+testing[is.na(testing)] <- 0 # Removed them!
+```
+
+We're almost there! Now we only have to predict again with our trained model, this time using the `testing` data we just cleaned-up.
+
+```{r, results = 'hold', warning = FALSE}
+predictions_testing <- predict(random_forest, testing)
+summary(predictions_testing)
+# And the predictions are...
+print(predictions_testing)
+```
+
+The results are reasonable, there are more occurrences of classes `A` and `B` than the rest, similar to what we discovered in the training data during the exploratory analysis.
+
+We should now enter the following values `B A B A A E D B A A B C B A E E A B B B` into the __Course Project Prediction Quiz__ and hope for a score better than __16__!
